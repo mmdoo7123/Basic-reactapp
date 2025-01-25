@@ -3,6 +3,7 @@ from flask_cors import CORS
 from tweepy import Client
 from time import sleep
 from newsapi import NewsApiClient  
+from time import time, sleep
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -27,15 +28,6 @@ def get_tweets():
             max_results=min(count, 100),  # API v2 allows max 100 tweets per request
             tweet_fields=["created_at", "text", "author_id"]  # Fields to include in the response
         )
-        # Handle rate limits
-        if response.meta.get("next_token") is None and "x-rate-limit-remaining" in response.headers:
-            remaining = int(response.headers["x-rate-limit-remaining"])
-            reset_time = int(response.headers["x-rate-limit-reset"])
-            if remaining == 0:
-                wait_time = reset_time - int(time.time())
-                print(f"Rate limit hit. Sleeping for {wait_time} seconds.")
-                sleep(wait_time)
-
 
         # Extract tweet data
         if response.data:
@@ -51,10 +43,20 @@ def get_tweets():
             return jsonify(tweet_data)
         else:
             return jsonify([])  # Return an empty list if no tweets are found
-
+    
     except Exception as e:
-        print(f"Error fetching tweets: {e}")
+
+        if hasattr(e, "response") and e.response.status_code == 429:
+                headers = e.response.headers
+                reset_time = int(headers.get("x-rate-limit-reset", int(time())))
+                wait_time = max(reset_time - int(time()), 0)
+
+                return jsonify({
+                    "error": "Rate limit exceeded",
+                    "wait_time": wait_time
+                }), 429
         return jsonify({"error": str(e)}), 500
+        
 @app.route('/news', methods=['GET'])
 def get_news():
     keyword = request.args.get('keyword', 'technology')

@@ -44,11 +44,13 @@ function App() {
     const [cooldownNews, setCooldownNews] = useState(0);
     const TWITTER_COOLDOWN = 105 * 60; // 105 minutes in seconds
     const NEWS_COOLDOWN = 60; // 1 minute in seconds (free tier)
-
+    const [waitTimeTwitter, setWaitTimeTwitter] = useState(0);
+    const [waitTimeNews, setWaitTimeNews] = useState(0);
+    
        // Fetch News Data
     const fetchGoogleNews = useCallback(() => {
-        if (cooldownNews > 0) {
-            setError(`Please wait ${cooldownNews} seconds before searching Google News again.`);
+        if (waitTimeNews > 0) {
+            setError(`Please wait ${waitTimeNews} seconds before searching Google News again.`);
             return;
         }
         setLoading(true);
@@ -63,7 +65,7 @@ function App() {
                     source: article.source,
                     publishedAt: article.published_at,
                 })));
-                setLastRequestTimeNews(Date.now());
+                setWaitTimeNews(0); // Reset timer on success
                 setLoading(false);
             })
             .catch((error) => {
@@ -71,7 +73,7 @@ function App() {
                 setError('Error fetching news. Please try again later.');
                 setLoading(false);
             });
-    }, [keyword, count, cooldownNews]);
+    }, [keyword, count, waitTimeNews]);
 
     const handleSearch = () => {
         if (source === 'Twitter') {
@@ -83,37 +85,38 @@ function App() {
 
     // Twitter Cooldown Logic
     useEffect(() => {
-        if (lastRequestTimeTwitter) {
-            const interval = setInterval(() => {
-                const now = Date.now();
-                const elapsed = Math.floor((now - lastRequestTimeTwitter) / 1000);
-                const remainingCooldown = Math.max(TWITTER_COOLDOWN - elapsed, 0);
-                setCooldownTwitter(remainingCooldown);
-
-                if (remainingCooldown === 0) {
-                    clearInterval(interval);
-                }
+        let timer;
+        if (waitTimeTwitter > 0) {
+            timer = setInterval(() => {
+                setWaitTimeTwitter((prevTime) => {
+                    if (prevTime <= 1) {
+                        clearInterval(timer);
+                        return 0;
+                    }
+                    return prevTime - 1;
+                });
             }, 1000);
-            return () => clearInterval(interval);
         }
-    }, [lastRequestTimeTwitter]);
-
+        return () => clearInterval(timer);
+    }, [waitTimeTwitter]);
+    
     // News Cooldown Logic
     useEffect(() => {
-        if (lastRequestTimeNews) {
-            const interval = setInterval(() => {
-                const now = Date.now();
-                const elapsed = Math.floor((now - lastRequestTimeNews) / 1000);
-                const remainingCooldown = Math.max(NEWS_COOLDOWN - elapsed, 0);
-                setCooldownNews(remainingCooldown);
-
-                if (remainingCooldown === 0) {
-                    clearInterval(interval);
-                }
+        let timer;
+        if (waitTimeNews > 0) {
+            timer = setInterval(() => {
+                setWaitTimeNews((prevTime) => {
+                    if (prevTime <= 1) {
+                        clearInterval(timer);
+                        return 0;
+                    }
+                    return prevTime - 1;
+                });
             }, 1000);
-            return () => clearInterval(interval);
         }
-    }, [lastRequestTimeNews]);
+        return () => clearInterval(timer);
+    }, [waitTimeNews]);
+    
 
     // Analyze Tweets and Cache Results
     const analyzedTweets = useMemo(() => {
@@ -176,8 +179,8 @@ function App() {
     
     // Fetch Twitter Data
     const fetchTweets = useCallback(() => {
-        if (cooldownTwitter > 0) {
-            setError(`Please wait ${cooldownTwitter} seconds before searching Twitter again.`);
+        if (waitTimeTwitter > 0) {
+            setError(`Please wait ${waitTimeTwitter} seconds before searching Twitter again.`);
             return;
         }
         setLoading(true);
@@ -186,16 +189,20 @@ function App() {
         axios.get('http://127.0.0.1:5000/tweets', { params: { keyword, count } })
             .then((response) => {
                 setTweets(response.data);
-                setLastRequestTimeTwitter(Date.now());
+                setWaitTimeTwitter(0); // Reset timer on success
                 setLoading(false);
             })
             .catch((error) => {
-                console.error('Error fetching tweets:', error);
-                setError('Error fetching tweets. Please try again later.');
+                if (error.response && error.response.status === 429) {
+                    const { wait_time } = error.response.data;
+                    setWaitTimeTwitter(wait_time); // Set the wait time from the backend
+                    setError(`Rate limit exceeded. Please wait ${wait_time} seconds.`);
+                } else {
+                    setError('An error occurred while fetching tweets.');
+                }
                 setLoading(false);
             });
-    }, [keyword, count, cooldownTwitter]);
-
+    }, [keyword, count, waitTimeTwitter]);
     // Export to CSV
     const exportToCSV = () => {
         const csvData = analyzedTweets.map((tweet) => ({
@@ -350,6 +357,25 @@ function App() {
         return [];
     }, [analyzedTweets]);
     
+    const chartData = sentimentCounts.positive || sentimentCounts.neutral || sentimentCounts.negative
+        ? {
+            labels: ['Positive', 'Neutral', 'Negative'],
+            datasets: [
+            {
+                data: [sentimentCounts.positive, sentimentCounts.neutral, sentimentCounts.negative],
+                backgroundColor: ['#4caf50', '#ffeb3b', '#f44336'],
+            },
+            ],
+        }
+        : {
+            labels: ['No Data'],
+            datasets: [
+            {
+                data: [1],
+                backgroundColor: ['#ccc'],
+            },
+            ],
+        };
         
     return (
         <div className="App">
@@ -369,6 +395,12 @@ function App() {
                         Google News
                     </button>
                 </div>
+                <div>
+                    <button onClick={() => setFilter('All')}>All</button>
+                    <button onClick={() => setFilter('Positive')}>Positive</button>
+                    <button onClick={() => setFilter('Neutral')}>Neutral</button>
+                    <button onClick={() => setFilter('Negative')}>Negative</button>
+                </div>
 
                 <div className="search-section">
                     <input
@@ -376,7 +408,7 @@ function App() {
                         value={keyword}
                         onChange={(e) => setKeyword(e.target.value)}
                         placeholder="Enter keyword"
-                        disabled={loading}
+                        disabled={loading || (source === 'Twitter' ? waitTimeTwitter > 0 : waitTimeNews > 0)}
                     />
                     <input
                         type="number"
@@ -384,30 +416,59 @@ function App() {
                         onChange={(e) => setCount(Number(e.target.value))}
                         placeholder="Number of Results"
                         min="1"
-                        disabled={loading}
+                        disabled={loading || (source === 'Twitter' ? waitTimeTwitter > 0 : waitTimeNews > 0)}
                     />
-                    <button onClick={handleSearch} disabled={loading}>
-                        {loading ? 'Loading...' : `Search ${source}`}
+                    <button
+                        onClick={handleSearch} 
+                        disabled={loading || (source === 'Twitter' ? waitTimeTwitter > 0 : waitTimeNews > 0)}
+                    >
+                        {loading ? 'Loading...' : `Fetch ${source === 'Twitter' ? 'Tweets' : 'News'}`}
                     </button>
+
                 </div>
 
-                {error && <p style={{ color: 'red' }}>{error}</p>}
+                {waitTimeTwitter > 0 && (
+                    <p>
+                        Twitter API rate limit exceeded. Please wait <strong>{waitTimeTwitter} seconds</strong> before trying again.
+                    </p>
+                )}
 
-                {/* Display Results */}
-                <ul>
-                    {tweets.map((item, index) => (
-                        <li key={index}>
-                            <h3>{item.text}</h3>
-                            {item.description && <p>{item.description}</p>}
-                            <p>
-                                Source: {item.source} | Published: {new Date(item.publishedAt).toLocaleString()}
-                            </p>
-                            <p>Sentiment: {item.sentiment}</p>
-                        </li>
-                    ))}
-                </ul>
-            </header>
-        </div>
+                {waitTimeNews > 0 && (
+                    <p>
+                        Google News API rate limit exceeded. Please wait <strong>{waitTimeNews} seconds</strong> before trying again.
+                    </p>
+                )}
+
+
+            {error && <p style={{ color: 'red' }}>{error}</p>}
+
+            <ul>
+                {analyzedTweets.map((item, index) => (
+                    <li key={item.id || index}>
+                        <h3>{item.text}</h3>
+                        {item.description && <p>{item.description}</p>}
+                        <p>Sentiment: <strong>{item.sentiment}</strong></p>
+                        <p>
+                            Source: {item.source || 'Unknown'} | Published: {item.publishedAt ? new Date(item.publishedAt).toLocaleString() : 'Unknown'}
+                        </p>
+
+                    </li>
+                ))}
+           
+            </ul>
+            <Pie
+                data={{
+                    labels: ['Positive', 'Neutral', 'Negative'],
+                    datasets: [
+                        {
+                            data: [sentimentCounts.positive, sentimentCounts.neutral, sentimentCounts.negative],
+                            backgroundColor: ['#4caf50', '#ffeb3b', '#f44336'],
+                        },
+                    ],
+                }}
+            />
+        </header>
+    </div>
     );
 }
 export default App;
